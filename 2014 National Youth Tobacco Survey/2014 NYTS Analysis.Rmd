@@ -1,0 +1,864 @@
+---
+title: 'American Youth Tobacco Use: an Analysis of the American National Youth Tobacco
+  Survey 2014'
+author: "Vinky Wang"
+date: "30/12/2020"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{subfig}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+- \usepackage{amsmath}
+---
+
+# Introduction
+Tobacco use in any form is unsafe for youth as nicotine exposure during adolescence may have lasting adverse consequences for brain development, causes addiction, and may lead to sustained tobacco use. $^{[1]}$ Smoking activity tends to differ across demographic characteristics including age, sex, race, and rurality. Additionally, variation may exist between schools and/or across U.S states. This report aims to investigate the prevalence of tobacco use in U.S middle and high schools across the variables of age, sex, and rurality for White, Black, and Hispanic American youths.
+
+# Methods
+The data is available through the 2014 National Youth Tobacco Survey (NYTS) which is a national pencil-and-paper questionnaire including responses on tobacco-related beliefs, attitudes, behaviours, and exposure to pro- and anti-tobacco influences. Through an exploratory analysis in Figure 1 on the total number of responses across age, only the 11 to 18 year old age groups were analysed for reliability purposes. The data contains 17421 observations in total for White, Black, and Hispanic American youths once removing the 9, 10, and 19 year old age groups. 
+
+A hiearchical logistic model with interaction effects of the age, sex, race, and rurality variables was fit to the binary response of smoking cigarettes for individual k of school j in US state i. The random effects are at the school and state level to account for their potential variations. The model was implemented in the INLA, or Integrated Nested Laplace Approximation software in R which is a computationally efficient method for implementing Bayesian models.$^{[2]}$ The strategy=‘laplace’ and fast=FALSE specifications were set to approximate the conditional modes.
+
+## Model
+$$ Y_{ijk} \sim Bernoulli(\theta_{ijk})$$
+$$logit(\theta_{ijk}) = X_{ijk}^T \beta + U_{ij} + U_i$$
+$$\beta  \sim  N(0,10^{2})$$
+$$U_{ij} \stackrel{iid} \sim N(0, \sigma_1^2)$$
+$$U_{i} \stackrel{iid}\sim N(0, \sigma_2^2)$$
+
+$$\sigma_1^2 \sim \text{Exponential prior such that } Pr( \sigma_1^2 > \frac{log(1.2)}{2.6}) = 0.5$$
+
+$$\sigma_2^2 \sim \text{Exponential prior such that } Pr( \sigma_2^2 > \frac{log(3)}{2.6}) = 0.5$$
+
+where
+
+- i = 1,...,33 US states, j = 1,..., 188 schools, k= 1,...,17421 individuals
+- $Y_{ijk}$: Response of smoking cigarettes for individual k of school j in state i; 0=No, 1=Yes
+- $\theta_{ijk}$: Probability of smoking cigarettes
+- $U_{ij}$: Random effect for school j in state i
+- $U_{i}$: Random effect for state i 
+
+## Prior Specification
+The following information was provided: 
+
+(1) It is expected that the ‘worst’ states will have double to triple the rate of smoking than the ‘healthiest’
+(2) Within a given state, the ‘worst’ schools will have a 10-20% greater smoking rate than the ‘healthiest’
+(3) ‘Worst’ corresponds to a 90th percentile and ‘healthiest’ corresponds to a 10th percentile
+
+A default weakly informative zero-mean Gaussian prior was assigned to the regression parameters $\beta$. The penalized complexity prior is an exponential of the square root of the Kullback-Leibler distance which gives preference to less complex models unless the data informs otherwise.$^{[3]}$ The prior for $\sigma_1^2$ such that $Pr(\sigma_1^2 > \frac{log(1.2)}{2.6}) = 0.5$ encodes line (2) of the provided information that the median of the school-level variability is expected to be no greater than 20% between the ‘worst’ and ‘healthiest’ schools. The prior for $\sigma_2^2$ such that $Pr( \sigma_2^2 > \frac{log(3)}{2.6}) = 0.5$ encodes line (3) that the median of the state-level variability is expected to be no greater than triple the occurrence between the ‘worst’ and ‘healthiest’ states. 
+
+
+# Results
+
+```{r include=FALSE}
+#load libraries
+library("INLA", verbose=FALSE)
+library(knitr)
+library(kableExtra)
+library(knitr)
+library(bookdown)
+library(ggplot2)
+library(FSA)
+library(dplyr)
+library(reshape2)
+
+
+#load data
+dataDir = "../data"
+smokeFile = file.path(dataDir, "smoke2014.RData") 
+if (!file.exists(smokeFile)) {
+download.file("http://pbrown.ca/teaching/appliedstats/data/smoke2014.RData", smokeFile)
+}
+
+
+#create dataframe 
+load(smokeFile)
+smoke[1:3, c("Age", "ever_cigarettes", "Sex", "Race",
+"state", "school", "RuralUrban")]
+
+forInla = smoke[, c("Age", "ever_cigarettes", "Sex",
+"Race", "state", "school", "RuralUrban")]
+
+#drop NAs
+forInla = na.omit(forInla) 
+
+#recode variables
+forInla$y = as.numeric(forInla$ever_cigarettes) #convert response into 0/1 encoding
+
+#races of interest for our study
+forInla_sub <- Subset(forInla,Race=="white" | Race=="black"| Race=="hispanic")
+
+
+```
+
+```{r plot1, echo=FALSE, fig.cap="Exploratory analysis of cigarette smoking activity for White, Black, and Hispanic American youths by age. Ages 9, 10, and 19 will be excluded in the analysis as responses appear to be unreliable.", fig.align="center" , fig.width=6, fig.height = 5, fig.asp=.8,out.width=".8\\linewidth", fig.show='hold'}
+
+#subset for age
+age_df = forInla_sub %>%
+  select(Age, y)
+
+age_df = as.data.frame.matrix(table(age_df))
+age_df$age <- rownames(age_df)
+names(age_df)[1] <- "No"
+names(age_df)[2] <- "Yes"
+
+age_df <- melt(age_df, "age")
+
+p1 <- ggplot(age_df, aes(x=age,y=value, fill=variable)) + 
+  geom_bar(stat='identity') + labs(x="Age", y="Counts", fill="Response") + theme_classic() 
+p1
+```
+
+```{r include=FALSE}
+#remove ages 9, 10, and 19 since appears to be unreliable
+#recode age as a factor
+forInla_sub = subset(forInla_sub, Age >= 11 & Age<19)
+
+forInla_sub$ageFac = factor(forInla_sub$Age)
+
+#view the data
+str(forInla_sub)
+head(forInla_sub)
+
+```
+
+```{r include=FALSE}
+#create grid
+toPredict = expand.grid(
+  ageFac = levels(forInla_sub$ageFac),
+  RuralUrban = levels(forInla_sub$RuralUrban),
+  Sex = levels(forInla_sub$Sex), 
+  Race = levels(forInla_sub$Race)
+  )
+
+forLincombs = do.call(inla.make.lincombs, 
+  as.data.frame(model.matrix( ~ ageFac:RuralUrban:Sex:Race, 
+    data=toPredict)))
+
+
+dim(toPredict) #108 items to predict, 4 terms
+
+## model 1: priors corresponding to expected observations
+# fits1 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+#     f(state, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(3)/2.6, 0.5)))
+#     ) + f(school, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(1.2)/2.6, 0.5)))
+#     ),
+#   data=forInla_sub, family='binomial',
+#   control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+#   lincomb = forLincombs,
+#   control.compute =  list(config=TRUE),
+#   control.inla = list(strategy='laplace', fast=FALSE))
+# save(fits1,file ="../data/fits1.RData")
+
+(load("fits1.RData"))
+
+
+## model 2: priors corresponding to upperbound of expected observations
+# fits2 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+#     f(state, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(4)/2.6, 0.5)))
+#     ) + f(school, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(1.4)/2.6, 0.5)))
+#     ),
+#   data=forInla_sub, family='binomial',
+#   control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+#   lincomb = forLincombs,
+#   control.inla = list(strategy='laplace', fast=FALSE),
+#   list(openmp.strategy="huge"))
+# save(fits2,file ="../data/fits2.RData")
+(load("fits2.RData"))
+
+## model 3: priors corresponding to unexpected observations
+# fits3 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+#     f(state, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(10)/2.6, 0.5)))
+#     ) + f(school, model='iid', hyper=list(
+#         prec=list(prior='pc.prec', param=c(log(1.8)/2.6, 0.5)))
+#     ),
+#   data=forInla_sub, family='binomial',
+#   control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+#   lincomb = forLincombs,
+#   control.inla = list(strategy='laplace', fast=FALSE),
+#   list(openmp.strategy="huge"))
+# save(fits3,file ="../data/fits3.RData")
+(load("fits3.RData"))
+
+
+
+```
+
+```{r plot2, echo=FALSE, fig.cap="Prior Sensitivity Analysis. Posterior distributions closely overlap suggesting that priors are not sensitive.", fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.show='hold', fig.subcap=c("by State", "by School")}
+#prior and posteriors of SD for each model
+theSd1= Pmisc::priorPost(fits1)
+theSd2= Pmisc::priorPost(fits2)
+theSd3= Pmisc::priorPost(fits3)
+
+#psa for state
+{plot(theSd1$`sd for state`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='blue')
+lines(theSd1$`sd for state`$prior, col='blue', lty=2)
+
+lines(theSd2$`sd for state`$posterior, col='green')
+lines(theSd2$`sd for state`$prior, col='green', lty=2)
+
+lines(theSd3$`sd for state`$posterior, col='red')
+lines(theSd3$`sd for state`$prior, col='red', lty=2)
+
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+#psa for school
+{plot(theSd1$`sd for school`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='blue')
+lines(theSd1$`sd for school`$prior, col='blue', lty=2)
+
+lines(theSd2$`sd for school`$posterior, col='green')
+lines(theSd2$`sd for school`$prior, col='green', lty=2)
+
+lines(theSd3$`sd for school`$posterior, col='red')
+lines(theSd3$`sd for school`$prior, col='red', lty=2)
+
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+```
+
+```{r plot3, echo=FALSE, fig.cap="Posterior distributions of the fitted model.", fig.align="center" , fig.width=4.5, fig.asp=1,out.width=".6\\linewidth", fig.show='hold'}
+
+#Posterior for state and school
+{plot(theSd1$`sd for state`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='lightblue', ylim=c(0,10))
+
+lines(theSd1$`sd for school`$posterior, type='l',
+     xlim = c(0,1), col='salmon')
+
+legend('topright',
+  lty=1, legend = c('State','School'), col=c("lightblue", "salmon"))
+}
+
+```
+
+
+```{r plot4, echo=FALSE, fig.cap="Marginal Effects.", fig.align="center" , fig.width=4.5, fig.asp=1,out.width=".55\\linewidth", fig.show='hold', fig.subcap=c("Intercept", "Age 11, Urban, Male, White American youth")}
+
+#plot beta0
+{plot(fits1[["marginals.fixed"]][["(Intercept)"]], type='l', col='medium purple', xlab="", ylab="Density")
+lines(fits1[["marginals.fixed"]][["(Intercept)"]][,'x'],
+dnorm(fits1[["marginals.fixed"]][["(Intercept)"]][,'x'],mean=0, sd=10), col='medium purple', lty=2)
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+
+#plot beta1
+{plot(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]], type='l', col='medium purple', ylab="Density", xlab="")
+lines(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]][,'x'],
+dnorm(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]][,'x'],mean=0, sd=10), col='medium purple', lty=2)
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+```
+
+```{r include=FALSE}
+#estimated probability
+#create matrix of estimated probabilities
+theCoef = exp(fits1$summary.lincomb.derived[,
+    c('0.5quant','0.025quant','0.975quant')])
+theCoef = theCoef/(1+theCoef)
+
+theSd = fits1$summary.lincomb.derived[,'sd']
+
+#change age from factor into numeric
+toPredict$Age = as.numeric(as.character(toPredict$ageFac))
+
+theEstimatedProb = cbind(toPredict, theCoef, theSd)
+```
+
+```{r plot5, echo=FALSE, fig.cap="Smoking Activity by Age.", fig.align="center" , fig.width=4.5, fig.asp=1, out.width=".55\\linewidth", fig.show="hold"}
+#effect of age on smoking
+toPredict$shiftX_race = as.numeric(toPredict$Race)/8
+toPredict$x2 = toPredict$Age + toPredict$shiftX_race
+
+{toPlot_age = toPredict$Sex == "M" & toPredict$RuralUrban ==
+"Rural"
+plot(toPredict[toPlot_age, "x2"], theCoef[toPlot_age, "0.5quant"],
+xlab = "age", ylab = "probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_age, "Race"])
+segments(toPredict[toPlot_age, "x2"], theCoef[toPlot_age, "0.025quant"],
+y1 = theCoef[toPlot_age, "0.975quant"], col = toPredict[toPlot_age,
+"Race"])
+legend("topleft", fill = 1:nlevels(toPredict$Race),
+legend = levels(toPredict$Race), bty = "n",
+title = "Race")
+}
+```
+
+
+```{r plot6, echo=FALSE, fig.cap="Smoking Activity by Age.", fig.align="left" , fig.width=4.5, fig.asp=1, out.width=".55\\linewidth", fig.show="hold"}
+#plot comparable individuals differing by rurality
+
+#create an x axis, shift by rurality
+toPredict$shiftX_rurality = as.numeric(toPredict$RuralUrban)/10
+toPredict$x1 = toPredict$Age + toPredict$shiftX_rurality 
+
+#age, males, white- on rural vs urban
+toPlot_mw = toPredict$Sex == "M" & toPredict$Race == "white"
+
+{plot(toPredict[toPlot_mw, "x1"], theCoef[toPlot_mw, "0.5quant"], sub="Male, White American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mw, "RuralUrban"])
+segments(toPredict[toPlot_mw, "x1"], theCoef[toPlot_mw, "0.025quant"],
+y1 = theCoef[toPlot_mw, "0.975quant"], col = toPredict[toPlot_mw,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+
+#age, females, white- on rural vs urban
+toPlot_fw = toPredict$Sex == "F" & toPredict$Race == "white"
+
+{plot(toPredict[toPlot_fw, "x1"], theCoef[toPlot_fw, "0.5quant"], sub="Female, White American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fw, "RuralUrban"])
+segments(toPredict[toPlot_fw, "x1"], theCoef[toPlot_fw, "0.025quant"],
+y1 = theCoef[toPlot_fw, "0.975quant"], col = toPredict[toPlot_fw,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+```
+
+```{r plot7, echo=FALSE, fig.cap="Smoking Activity by Age.", fig.align="left" , fig.width=4.5, fig.asp=1, out.width=".55\\linewidth", fig.show="hold"}
+#age, males, black- on rural vs urban
+toPlot_mb = toPredict$Sex == "M" & toPredict$Race == "black"
+
+{plot(toPredict[toPlot_mb, "x1"], theCoef[toPlot_mb, "0.5quant"], sub="Male, Black American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mb, "RuralUrban"])
+segments(toPredict[toPlot_mb, "x1"], theCoef[toPlot_mb, "0.025quant"],
+y1 = theCoef[toPlot_mb, "0.975quant"], col = toPredict[toPlot_mb,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, females, black-on rural vs urban
+toPlot_fb = toPredict$Sex == "F" & toPredict$Race == "black"
+
+{plot(toPredict[toPlot_fb, "x1"], theCoef[toPlot_fb, "0.5quant"], sub="Female, Black American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fb, "RuralUrban"])
+segments(toPredict[toPlot_fb, "x1"], theCoef[toPlot_fb, "0.025quant"],
+y1 = theCoef[toPlot_fb, "0.975quant"], col = toPredict[toPlot_fb,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+```
+
+```{r plot8, echo=FALSE, fig.cap="Smoking Activity by Age.", fig.align="left" , fig.width=4.5, fig.asp=1, out.width=".55\\linewidth", fig.show="hold"}
+#age, males, hispanic- on rural vs urban
+toPlot_mh = toPredict$Sex == "M" & toPredict$Race == "hispanic"
+
+{plot(toPredict[toPlot_mh, "x1"], theCoef[toPlot_mh, "0.5quant"], sub="Male, Hispanic American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mh, "RuralUrban"])
+segments(toPredict[toPlot_mh, "x1"], theCoef[toPlot_mh, "0.025quant"],
+y1 = theCoef[toPlot_mh, "0.975quant"], col = toPredict[toPlot_mh,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, females, hispanic- on rural vs urban
+toPlot_fh = toPredict$Sex == "F" & toPredict$Race == "hispanic"
+
+{plot(toPredict[toPlot_fh, "x1"], theCoef[toPlot_fh, "0.5quant"], sub="Female, Hispanic American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fw, "RuralUrban"])
+segments(toPredict[toPlot_fh, "x1"], theCoef[toPlot_fh, "0.025quant"],
+y1 = theCoef[toPlot_fh, "0.975quant"], col = toPredict[toPlot_fh,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#find the age group where the largest variation between urban and rural exist, for male White American youths
+estimatedprob_mw = Subset(theEstimatedProb, toPlot_mw)
+estimatedprob_mw <- estimatedprob_mw %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`, `0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mw, caption="Estimated Probability of Smoking by Age and Rurality for White Male American Youths", format="pandoc")
+
+#The greatest difference in cigarette smoking activity between urban and rural male, White American youths is 12.5% which is observed for the 18 year age old group. 
+
+#find the age group where the largest variation between urban and rural exist, for female White American youths
+estimatedprob_fw = Subset(theEstimatedProb, toPlot_fw)
+estimatedprob_fw <- estimatedprob_fw %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`, `0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fw, caption="Estimated Probability of Smoking by Age and Rurality for White Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, White American youths is 9.8% which is observed for the 14 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for male Black American youths
+estimatedprob_mb = Subset(theEstimatedProb, toPlot_mb)
+estimatedprob_mb <- estimatedprob_mb %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mb, caption="Estimated Probability of Smoking by Age and Rurality for Black Male American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural male, Black American youths is 11.8% which is observed for the 15 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for female Black American youths
+estimatedprob_fb = Subset(theEstimatedProb, toPlot_fb)
+estimatedprob_fb <- estimatedprob_fb %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fb, caption="Estimated Probability of Smoking by Age and Rurality for Black Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, Black American youths is 9.2% which is observed for the 17 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for male Hispanic American youths
+estimatedprob_mh = Subset(theEstimatedProb, toPlot_mh)
+estimatedprob_mh <- estimatedprob_mh %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mh, caption="Estimated Probability of Smoking by Age and Rurality for Hispanic Male  American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural male, Hispanic American youths is 18.2% which is observed for the 17 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for female Hispanic American youths
+estimatedprob_fh = Subset(theEstimatedProb, toPlot_fh)
+estimatedprob_fh <- estimatedprob_fh %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fh, caption="Estimated Probability of Smoking by Age and Rurality for Hispanic Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, Hispanic American youths is 11.2% which is observed for the 18 year old age group. 
+
+#The largest rural-urban difference in probability of cigarette smoking among youths of the same age, gender, and race is 18.2% which is observed for the age 17, male Hispanic American group. 
+#As the posterior median for the state is 0.273 which corresponds to double the rate of cigarette smoking for the 'worst' state relative to the 'healthiest' for a 1 SD increase, the differences between state is greater than the differences between rurality.
+```
+
+```{r echo=FALSE}
+kable(theSd1$summary[,c('0.5quant','0.025quant','0.975quant')], caption= "Posterior Median for Random Effects", format="pandoc")
+```
+
+# Discussion
+The following additional priors specifications were explored for a prior sensitivity analysis:
+
+(1) $$Pr( \sigma_1^2 > \frac{log(1.4)}{2.6}) = 0.5 \text{ and } Pr( \sigma_2^2 > \frac{log(4)}{2.6}) = 0.5$$
+
+(2) $$Pr( \sigma_1^2 > \frac{log(10)}{2.6}) = 0.5 \text{ and } Pr( \sigma_2^2 > \frac{log(1.8)}{2.6}) = 0.5$$
+
+Model (1) represents the prior belief that the smoking activity will be 40% greater for the ‘worst’ schools relative to the ‘healthiest' and greater by a factor of four for the ‘worst’ states relative to the ‘healthiest’. Model (2) represents the prior belief that the smoking activity will be 80% greater for the ‘worst’ schools relative to the ‘healthiest’ and greater by a factor of 10 for the ‘worst’ states relative to the ‘healthiest’. As there is much overlap between the posterior distributions of the fitted model with model (1) and model (2) shown in Figure 2, this suggests that the priors are not sensitive and that the data is mainly informing the posteriors rather than the priors. The default weakly informative Gaussian priors assigned to the regression parameters is sensible and covers a wide range of possible values for the marginal effects as shown in Figure 4. 
+
+The posterior median for the state standard deviation is 0.273 and for school is 0.471 with 95% credible intervals of (0.142, 0.459) and (0.391, 0.560) respectively, suggesting evidence of a statistically significant difference across schools and between states. For a 1 standard deviation increase, we expect double the rate of cigarette smoking activity for the ‘worst’ states relative to the ‘healthiest’ and about triple the rate for the ‘worst’ schools relative to the healthiest. Hence, tobacco prevention control programs should target schools where smoking is a problem. Figure 3 and Table 7.
+
+The greatest difference in cigarette smoking activity between urban and rural individuals of the same gender, race, and age group shown in Figure 7 to 8 and Table 1 to 6 are the following: (1) 12.5% between urban and rural male, White American youths corresponding to the 18 year age old group; (2) 9.8% between urban and rural female, White American youths corresponding to the 14 year age old group; (3) 11.8% between urban and rural male, Black American youths corresponding to the 15 year age old group; (4) 9.2% between urban and rural female, Black American youths corresponding to the 17 year age old group; (5) 18.2% between urban and rural male, Hispanic American youths corresponding to the 17 year age old group; (6) 11.2% between urban and rural female, Hispanic American youths corresponding to the 18 year age old group. 
+
+The rural-urban difference in probability of cigarette smoking among youths of the same age, gender, and race is 18.2% which is observed for the age 17, male Hispanic American group. As the posterior median for the state is 0.273 which corresponds to double the rate of cigarette smoking for the ‘worst’ states relative to the ‘healthiest’ for a 1 standard deviation increase, the differences between states is greater than the differences between rurality for comparable individuals. Figure 7 to 8 and Table 1 to 6. 
+
+Furthermore, the probability of smoking for both rural and urban youths of all gender and race tends to increase with age. The level of cigarette smoking activity across race is most consistent for the 18 year olds, and most varied for the 17 year olds. The probability of smoking cigarettes is most likely at age 18 and least at age 12 for White-, most likely at age 18 and least at age 11 for Black-, and most likely at age 17 and least at age 11 for Hispanic- American youth. Figure 6. 
+
+# Conclusion
+Tobacco prevention control programs should identify schools where smoking is a problem rather than targeting select U.S states. The variability between states is greater than the variability between the rurality of schools for comparable individuals. Finally, these programs should be implemented for youths early on as the probability of smoking tends to increase with age across all demographics.
+
+# References
+[1] Arrazola, R. A. (2015, April 17). Tobacco Use Among Middle and High School Students - United States, 2011–2014. Retrieved November 01, 2020, from https://www.cdc.gov/mmwr/preview/mmwrhtml/mm6414a3.htm
+
+[2] Bayesian computing. (2015). Spatial and Spatio-temporal Bayesian Models with R-INLA, 75-126. doi:10.1002/9781118950203.ch4
+
+[3] Simpson, D., Rue, H., Riebler, A., Martins, T. G., &amp; Sørbye, S. H. (2017). Penalising Model Component Complexity: A Principled, Practical Approach to Constructing Priors. Statistical Science, 32(1), 1-28. doi:10.1214/16-sts576
+
+
+# Appendix
+```{r}
+kable(theEstimatedProb, format="pandoc", caption="The Estimated Probabilities")
+```
+
+```{r eval=FALSE}
+#load libraries
+library("INLA", verbose=FALSE)
+library(knitr)
+library(kableExtra)
+library(knitr)
+library(bookdown)
+library(ggplot2)
+library(FSA)
+library(dplyr)
+library(reshape2)
+
+
+#load data
+dataDir = "../data"
+smokeFile = file.path(dataDir, "smoke2014.RData") 
+if (!file.exists(smokeFile)) {
+download.file("http://pbrown.ca/teaching/appliedstats/data/smoke2014.RData", smokeFile)
+}
+
+
+#create dataframe 
+load(smokeFile)
+smoke[1:3, c("Age", "ever_cigarettes", "Sex", "Race",
+"state", "school", "RuralUrban")]
+
+forInla = smoke[, c("Age", "ever_cigarettes", "Sex",
+"Race", "state", "school", "RuralUrban")]
+
+#drop NAs
+forInla = na.omit(forInla) 
+
+#recode variables
+forInla$y = as.numeric(forInla$ever_cigarettes) #convert response into 0/1 encoding
+
+#races of interest for our study
+forInla_sub <- Subset(forInla,Race=="white" | Race=="black"| Race=="hispanic")
+
+#subset for age
+age_df = forInla_sub %>%
+  select(Age, y)
+
+age_df = as.data.frame.matrix(table(age_df))
+age_df$age <- rownames(age_df)
+names(age_df)[1] <- "No"
+names(age_df)[2] <- "Yes"
+
+age_df <- melt(age_df, "age")
+
+p1 <- ggplot(age_df, aes(x=age,y=value, fill=variable)) + 
+  geom_bar(stat='identity') + labs(x="Age", y="Counts", fill="Response") + theme_classic() 
+p1
+
+
+#remove ages 9, 10, and 19 since appears to be unreliable
+#recode age as a factor
+forInla_sub = subset(forInla_sub, Age >= 11 & Age<19)
+
+forInla_sub$ageFac = factor(forInla_sub$Age)
+
+#view the data
+str(forInla_sub)
+head(forInla_sub)
+
+#create grid
+toPredict = expand.grid(
+  ageFac = levels(forInla_sub$ageFac),
+  RuralUrban = levels(forInla_sub$RuralUrban),
+  Sex = levels(forInla_sub$Sex), 
+  Race = levels(forInla_sub$Race)
+  )
+
+forLincombs = do.call(inla.make.lincombs, 
+  as.data.frame(model.matrix( ~ ageFac:RuralUrban:Sex:Race, 
+    data=toPredict)))
+
+
+dim(toPredict) #108 items to predict, 4 terms
+
+#model 1: priors corresponding to expected observations
+fits1 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+    f(state, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(3)/2.6, 0.5)))
+    ) + f(school, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(1.2)/2.6, 0.5)))
+    ),
+  data=forInla_sub, family='binomial',
+  control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+  lincomb = forLincombs,
+  control.compute =  list(config=TRUE),
+  control.inla = list(strategy='laplace', fast=FALSE))
+save(fits1,file ="../data/fits1.RData")
+
+#model 2: priors corresponding to upperbound of expected observations
+fits2 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+    f(state, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(4)/2.6, 0.5)))
+    ) + f(school, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(1.4)/2.6, 0.5)))
+    ),
+  data=forInla_sub, family='binomial',
+  control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+  lincomb = forLincombs,
+  control.inla = list(strategy='laplace', fast=FALSE),
+  list(openmp.strategy="huge"))
+save(fits2,file ="../data/fits2.RData")
+
+#model 3: priors corresponding to unexpected observations
+fits3 = inla(y ~ ageFac:RuralUrban:Sex:Race +
+    f(state, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(10)/2.6, 0.5)))
+    ) + f(school, model='iid', hyper=list(
+        prec=list(prior='pc.prec', param=c(log(1.8)/2.6, 0.5)))
+    ),
+  data=forInla_sub, family='binomial',
+  control.fixed = list(mean=0, mean.intercept=0, prec=10^(-2), prec.intercept=10^(-2)),
+  lincomb = forLincombs,
+  control.inla = list(strategy='laplace', fast=FALSE),
+  list(openmp.strategy="huge"))
+save(fits3,file ="../data/fits3.RData")
+
+#prior and posteriors of SD for each model
+theSd1= Pmisc::priorPost(fits1)
+theSd2= Pmisc::priorPost(fits2)
+theSd3= Pmisc::priorPost(fits3)
+
+#psa for state
+{plot(theSd1$`sd for state`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='blue')
+lines(theSd1$`sd for state`$prior, col='blue', lty=2)
+
+lines(theSd2$`sd for state`$posterior, col='green')
+lines(theSd2$`sd for state`$prior, col='green', lty=2)
+
+lines(theSd3$`sd for state`$posterior, col='red')
+lines(theSd3$`sd for state`$prior, col='red', lty=2)
+
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+#psa for school
+{plot(theSd1$`sd for school`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='blue')
+lines(theSd1$`sd for school`$prior, col='blue', lty=2)
+
+lines(theSd2$`sd for school`$posterior, col='green')
+lines(theSd2$`sd for school`$prior, col='green', lty=2)
+
+lines(theSd3$`sd for school`$posterior, col='red')
+lines(theSd3$`sd for school`$prior, col='red', lty=2)
+
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+#Posterior for state and school
+{plot(theSd1$`sd for state`$posterior, type='l', xlab='Standard Deviation', ylab='Density',
+     xlim = c(0,1), col='lightblue', ylim=c(0,10))
+
+lines(theSd1$`sd for school`$posterior, type='l',
+     xlim = c(0,1), col='salmon')
+
+legend('topright',
+  lty=1, legend = c('State','School'), col=c("lightblue", "salmon"))
+}
+
+#plot beta0
+{plot(fits1[["marginals.fixed"]][["(Intercept)"]], type='l', col='medium purple', xlab="", ylab="Density")
+lines(fits1[["marginals.fixed"]][["(Intercept)"]][,'x'],
+dnorm(fits1[["marginals.fixed"]][["(Intercept)"]][,'x'],mean=0, sd=10), col='medium purple', lty=2)
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+
+#plot beta1
+{plot(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]], type='l', col='medium purple', ylab="Density", xlab="")
+lines(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]][,'x'],
+dnorm(fits1[["marginals.fixed"]][["ageFac11:RuralUrbanUrban:SexM:Racewhite"]][,'x'],mean=0, sd=10), col='medium purple', lty=2)
+legend('topright',
+  lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+  bty='n')
+}
+
+#estimated probability
+#create matrix of estimated probabilities
+theCoef = exp(fits1$summary.lincomb.derived[,
+    c('0.5quant','0.025quant','0.975quant')])
+theCoef = theCoef/(1+theCoef)
+
+theSd = fits1$summary.lincomb.derived[,'sd']
+
+#change age from factor into numeric
+toPredict$Age = as.numeric(as.character(toPredict$ageFac))
+
+theEstimatedProb = cbind(toPredict, theCoef, theSd)
+
+#effect of age on smoking
+toPredict$shiftX_race = as.numeric(toPredict$Race)/8
+toPredict$x2 = toPredict$Age + toPredict$shiftX_race
+
+{toPlot_age = toPredict$Sex == "M" & toPredict$RuralUrban ==
+"Rural"
+plot(toPredict[toPlot_age, "x2"], theCoef[toPlot_age, "0.5quant"],
+xlab = "age", ylab = "probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_age, "Race"])
+segments(toPredict[toPlot_age, "x2"], theCoef[toPlot_age, "0.025quant"],
+y1 = theCoef[toPlot_age, "0.975quant"], col = toPredict[toPlot_age,
+"Race"])
+legend("topleft", fill = 1:nlevels(toPredict$Race),
+legend = levels(toPredict$Race), bty = "n",
+title = "Race")
+}
+
+plot comparable individuals differing by rurality
+
+#create an x axis, shift by rurality
+toPredict$shiftX_rurality = as.numeric(toPredict$RuralUrban)/10
+toPredict$x1 = toPredict$Age + toPredict$shiftX_rurality 
+
+#age, males, white- on rural vs urban
+toPlot_mw = toPredict$Sex == "M" & toPredict$Race == "white"
+
+{plot(toPredict[toPlot_mw, "x1"], theCoef[toPlot_mw, "0.5quant"], sub="Male, White American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mw, "RuralUrban"])
+segments(toPredict[toPlot_mw, "x1"], theCoef[toPlot_mw, "0.025quant"],
+y1 = theCoef[toPlot_mw, "0.975quant"], col = toPredict[toPlot_mw,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+
+#age, females, white- on rural vs urban
+toPlot_fw = toPredict$Sex == "F" & toPredict$Race == "white"
+
+{plot(toPredict[toPlot_fw, "x1"], theCoef[toPlot_fw, "0.5quant"], sub="Female, White American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fw, "RuralUrban"])
+segments(toPredict[toPlot_fw, "x1"], theCoef[toPlot_fw, "0.025quant"],
+y1 = theCoef[toPlot_fw, "0.975quant"], col = toPredict[toPlot_fw,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, males, black- on rural vs urban
+toPlot_mb = toPredict$Sex == "M" & toPredict$Race == "black"
+
+{plot(toPredict[toPlot_mb, "x1"], theCoef[toPlot_mb, "0.5quant"], sub="Male, Black American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mb, "RuralUrban"])
+segments(toPredict[toPlot_mb, "x1"], theCoef[toPlot_mb, "0.025quant"],
+y1 = theCoef[toPlot_mb, "0.975quant"], col = toPredict[toPlot_mb,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, females, black-on rural vs urban
+toPlot_fb = toPredict$Sex == "F" & toPredict$Race == "black"
+
+{plot(toPredict[toPlot_fb, "x1"], theCoef[toPlot_fb, "0.5quant"], sub="Female, Black American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fb, "RuralUrban"])
+segments(toPredict[toPlot_fb, "x1"], theCoef[toPlot_fb, "0.025quant"],
+y1 = theCoef[toPlot_fb, "0.975quant"], col = toPredict[toPlot_fb,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, males, hispanic- on rural vs urban
+toPlot_mh = toPredict$Sex == "M" & toPredict$Race == "hispanic"
+
+{plot(toPredict[toPlot_mh, "x1"], theCoef[toPlot_mh, "0.5quant"], sub="Male, Hispanic American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_mh, "RuralUrban"])
+segments(toPredict[toPlot_mh, "x1"], theCoef[toPlot_mh, "0.025quant"],
+y1 = theCoef[toPlot_mh, "0.975quant"], col = toPredict[toPlot_mh,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#age, females, hispanic- on rural vs urban
+toPlot_fh = toPredict$Sex == "F" & toPredict$Race == "hispanic"
+
+{plot(toPredict[toPlot_fh, "x1"], theCoef[toPlot_fh, "0.5quant"], sub="Female, Hispanic American youths",
+xlab = "Age", ylab = "Probability", ylim = c(0,
+1), pch = 15, col = toPredict[toPlot_fw, "RuralUrban"])
+segments(toPredict[toPlot_fh, "x1"], theCoef[toPlot_fh, "0.025quant"],
+y1 = theCoef[toPlot_fh, "0.975quant"], col = toPredict[toPlot_fh,
+"RuralUrban"])
+legend("topleft", fill = 1:nlevels(toPredict$RuralUrban),
+legend = levels(toPredict$RuralUrban), bty = "n",
+title = "Rurality")
+}
+
+#find the age group where the largest variation between urban and rural exist, for male White American youths
+estimatedprob_mw = Subset(theEstimatedProb, toPlot_mw)
+estimatedprob_mw <- estimatedprob_mw %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`, `0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mw, caption="Estimated Probability of Smoking by Age and Rurality for White Male American Youths", format="pandoc")
+
+#The greatest difference in cigarette smoking activity between urban and rural male, White American youths is 12.5% which is observed for the 18 year age old group. 
+
+#find the age group where the largest variation between urban and rural exist, for female White American youths
+estimatedprob_fw = Subset(theEstimatedProb, toPlot_fw)
+estimatedprob_fw <- estimatedprob_fw %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`, `0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fw, caption="Estimated Probability of Smoking by Age and Rurality for White Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, White American youths is 9.8% which is observed for the 14 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for male Black American youths
+estimatedprob_mb = Subset(theEstimatedProb, toPlot_mb)
+estimatedprob_mb <- estimatedprob_mb %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mb, caption="Estimated Probability of Smoking by Age and Rurality for Black Male American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural male, Black American youths is 11.8% which is observed for the 15 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for female Black American youths
+estimatedprob_fb = Subset(theEstimatedProb, toPlot_fb)
+estimatedprob_fb <- estimatedprob_fb %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fb, caption="Estimated Probability of Smoking by Age and Rurality for Black Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, Black American youths is 9.2% which is observed for the 17 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for male Hispanic American youths
+estimatedprob_mh = Subset(theEstimatedProb, toPlot_mh)
+estimatedprob_mh <- estimatedprob_mh %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_mh, caption="Estimated Probability of Smoking by Age and Rurality for Hispanic Male  American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural male, Hispanic American youths is 18.2% which is observed for the 17 year old age group. 
+
+#find the age group where the largest variation between urban and rural exist, for female Hispanic American youths
+estimatedprob_fh = Subset(theEstimatedProb, toPlot_fh)
+estimatedprob_fh <- estimatedprob_fh %>% 
+  group_by(Age, RuralUrban) %>%
+  summarise(`0.5quant`,`0.025quant`, `0.975quant`)
+knitr::kable(estimatedprob_fh, caption="Estimated Probability of Smoking by Age and Rurality for Hispanic Female American Youths", format="pandoc")
+#The greatest difference in cigarette smoking activity between urban and rural female, Hispanic American youths is 11.2% which is observed for the 18 year old age group. 
+
+#The largest rural-urban difference in probability of cigarette smoking among youths of the same age, gender, and race is 18.2% which is observed for the age 17, male Hispanic American group. 
+#As the posterior median for the state is 0.273 which corresponds to double the rate of cigarette smoking for the 'worst' state relative to the 'healthiest' for a 1 SD increase, the differences between state is greater than the differences between rurality.
+
+kable(theSd1$summary[,c('0.5quant','0.025quant','0.975quant')], caption= "Posterior Median for Random Effects", format="pandoc")
+
+```
+
