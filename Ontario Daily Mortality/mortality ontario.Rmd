@@ -1,0 +1,1180 @@
+---
+title: 'Mortality in Ontario: An Analysis of Daily Mortality by Age, Pre- and Current COVID Era'
+author: "Vinky Wang"
+date: "02/01/2021"
+output:
+  pdf_document: default
+  html_document: default
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{subfig}
+- \usepackage{float}
+- \floatplacement{figure}{H}
+- \usepackage{amsmath}
+---
+
+# Introduction
+As the total number of daily mortality counts in Ontario continue to rise, the cases for the older demographic (over 85 years old) appear to be aligning with historical averages whereas cases for the younger demographic (under 45 years old) are steadily increasing. It is believed that the younger population are mainly responsible for the second wave of the COVID-19 pandemic (September to present) as the first wave (March to May) primarily affected the older population and various public health measures have been put in place since then. This report aims to investigate daily mortality counts among the younger and older demographics comparing the first and second wave of the COVID-19 pandemic.
+
+# Methods
+The data is available through [Statistics Canada](https://www150.statcan.gc.ca/t1/tbl1/en/tv.action?pid=1310076801&pickMembers%5B0%5D=3.1&cubeTimeFrame.startDaily=2010-01-01&cubeTimeFrame.endDaily=2020-10-31&referencePeriods=20100101%2C20201031) Table: 13-10-0768-01 which is a table of the weekly number of deaths from January 1st, 2010 to October 31st, 2020. Anytime before March 1st, 2020 is referred to as pre-COVID era and anytime after is the present COVID-era for the purposes of this analysis. 
+
+Through an exploratory analysis in Figure 1 of the daily mortality counts, an overall increasing trend is observed which may correspond to an increasing and/or aging population in Ontario. Additionally, there appears to be an annual cyclical pattern and a seasonal trend with higher deaths during the winter months (around week 1) likely due to the flu season and lower during the summer months (around week 30). 
+
+A seasonally adjusted poisson regression model was fit to the positive, count response of daily mortality. The seasonal adjustment captures the winter and summer month variation and sinusoidal basis functions of $sin(2\pi x_i)$ and $cos(2\pi x_i)$ corresponding to the annual fluctuations and  $sin(4\pi x_i)$ and $cos(4\pi x_i)$ to the bi-annual captures the cyclical pattern. The model was implemented in the INLA, or Integrated Nested Laplace Approximation software in R which is a computationally efficient method for implementing Bayesian inferences.$^{1}$
+
+## Model
+$$Y_i \sim Poisson(\lambda_i)$$
+
+$$log(\lambda_i) = X_i^T\beta + f_i(t_i) + V_i$$
+
+$$V_i \sim N(0,\tau^2)$$
+
+$$f_i(t+1) - 2f(t) + f(t-1) \sim N(0,\sigma^2)$$
+
+$$\beta \sim MVN(0,\kappa I)$$
+
+$$\tau \sim \text{Exponential prior such that } Pr( \tau^2 > log(1.2)) = 0.5$$
+
+$$ \sigma \sim \text{Exponential prior such that} Pr(\sigma^2 > 0.01) = 0.5$$
+
+- $Y_i$: Daily mortality counts
+
+- $\lambda_i$: Mean of deaths
+
+- $f_i(t_i)$: Seasonally adjusted trend following a second order Random Walk 
+
+- $V_i$: Overdispersion 
+
+
+## Prior Specification
+A default weakly informative zero-mean Gaussian prior was assigned to the regression parameters $\beta$. By the favoured model principle of penalized least squares with a second derivative penalty, a second order random walk was assigned to the seasonally adjusted trend to encourage straight lines for achieving lower bias.$^{[2]}$ A penalized complexity prior was used on the second order random walk to control the strength of the constraint to the favoured model.$^{[3]}$ The prior of $Pr( \tau^2 > log(1.2)) = 0.5$ encodes our belief that the weekly variability should be no greater than 20% as the prior median. The prior of $Pr(\sigma^2 > 0.01) = 0.5$ encodes our belief that the yearly change in slope should be no greater than 0.01 as the prior median. As the simulated posterior samples by the fitted model with the above prior specifications follow closely with the observed data, this suggests that our priors are on the appropriate order of magnitude.
+
+
+
+# Results
+```{r include=FALSE}
+#load library
+library(cansim)
+library(dplyr)
+library(lubridate)
+library(INLA, verbose=FALSE)
+library(knitr)
+library(bookdown)
+library(kableExtra)
+library(LDATS)
+
+
+#load data
+deaths = get_cansim("13-10-0768-01")
+
+deaths <- deaths %>% 
+  filter(GEO == "Ontario, place of occurrence", Sex == "Both sexes") %>%
+  rename(age = "Age at time of death", dead = "VALUE")
+
+#create dataframe
+x = deaths[,c("REF_DATE", "age", "dead")]
+x$time = as.Date(x$REF_DATE)
+x$week = week(x$REF_DATE)
+x$year = year(x$REF_DATE)
+
+x = x[!is.na(x$dead), ]
+
+#view dataframe
+str(x)
+head(x)
+
+```
+
+
+```{r plot1, echo=FALSE, fig.cap="Number of Deaths in Ontario", fig.subcap=c("Total over the years", "Weekly over the years"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+
+#plots
+#spikes correspond to flu season (winter months)
+plot(x[x$age == "Age at time of death, all ages", c("time", "dead")], type = "o",
+log = "y", ylab="Number of Deaths", xlab="Time", cex=0.5)
+
+xWide2 = reshape2::dcast(x, week + age ~ year, value.var = "dead")
+Syear = grep("[[:digit:]]", colnames(xWide2), value = TRUE)
+Scol = RColorBrewer::brewer.pal(length(Syear), "Spectral")
+
+{matplot(xWide2[xWide2$age == "Age at time of death, all ages", Syear], type = "l",
+lty = 1, col = Scol, xlab="Weeks", ylab="Number of Deaths")
+legend("topright", col = Scol, legend = Syear, bty = "n",
+lty = 1, lwd = 3)}
+
+```
+
+```{r include=FALSE}
+#divide the data into pre and post covid, add extra dates for forecasting in INLA
+dateCutoff = as.Date("2020/3/1")
+xPreCovid = x[x$time < dateCutoff, ]
+xPostCovid = x[x$time >= dateCutoff, ]
+toForecast = expand.grid(age = unique(x$age), time = unique(xPostCovid$time),
+dead = NA)
+xForInla = rbind(xPreCovid[, colnames(toForecast)],
+toForecast)
+xForInla = xForInla[order(xForInla$time, xForInla$age),
+]
+
+#create some time variables, including sines and cosines. Time in years and centred so numerically stable in INLA
+xForInla$timeNumeric = as.numeric(xForInla$time)
+xForInla$timeForInla = (xForInla$timeNumeric - as.numeric(as.Date("2015/1/1")))/365.25
+xForInla$timeIid = xForInla$timeNumeric
+xForInla$sin12 = sin(2 * pi * xForInla$timeNumeric/365.25)
+xForInla$sin6 = sin(2 * pi * xForInla$timeNumeric *
+2/365.25)
+xForInla$cos12 = cos(2 * pi * xForInla$timeNumeric/365.25)
+xForInla$cos6 = cos(2 * pi * xForInla$timeNumeric *
+2/365.25)
+
+#select age groups of interest
+xForInla45= xForInla[xForInla$age == 'Age at time of death, 0 to 44 years', ]
+xForInla85= xForInla[xForInla$age == 'Age at time of death, 85 years and over', ]
+
+#fit INLA on <45 year old
+underres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.01, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+
+#fit INLA on >85 year old 
+overres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.01, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+
+
+```
+
+
+```{r plot2, echo=FALSE, fig.cap="Prior Sensitivity Analysis for Deaths Under 45 Years Old. Prior and Posterior Distributions.", fig.subcap=c("by Weekly", "by Yearly"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+#prior sensitivity analysis 
+under2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+under3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_underres= Pmisc::priorPost(underres)
+theSd_under2= Pmisc::priorPost(under2)
+theSd_under3= Pmisc::priorPost(under3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_underres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,100), xlim=c(0,0.2))
+lines(theSd_underres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_under2$`sd for timeIid`$posterior, col='green')
+lines(theSd_under2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_under3$`sd for timeIid`$posterior, col='red')
+lines(theSd_under3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_underres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,50), xlim=c(0,0.4))
+lines(theSd_underres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_under2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_under2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_under3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_under3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+```
+
+```{r plot3, echo=FALSE, fig.cap="Prior Sensitivity Analysis for Deaths over 85 Years Old. Prior and Posterior Distributions.", fig.subcap=c("by Weekly", "by Yearly"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+
+#prior sensitivity analysis 
+over2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+over3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_overres= Pmisc::priorPost(overres)
+theSd_over2= Pmisc::priorPost(over2)
+theSd_over3= Pmisc::priorPost(over3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_overres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,160), xlim=c(0,0.1))
+lines(theSd_overres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_over2$`sd for timeIid`$posterior, col='green')
+lines(theSd_over2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_over3$`sd for timeIid`$posterior, col='red')
+lines(theSd_over3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_overres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,60), xlim=c(0,0.2))
+lines(theSd_overres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_over2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_over2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_over3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_over3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+```
+
+
+```{r plot4, echo=FALSE, fig.cap="Random Effect. Yearly Change in Slope.", fig.subcap=c("Under 45 Years Old", "Over 85 Years Old"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+
+#random effect under 45
+{matplot(xForInla45$time, underres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5) *
+0.4, ylab="Relative Change, Yearly", xlab="Time")
+legend("bottomright", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+
+}
+
+#random effect over 85
+{matplot(xForInla85$time, overres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5), ylab="Relative Change, Yearly", xlab="Time")
+legend("bottomright", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+}
+
+
+```
+
+
+```{r echo=FALSE, fig.cap="Simulated Posterior Samples for Daily Mortality Counts.", fig.subcap=c("Under 45 Years Old", "Over 85 Years Old"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#under 45
+#first wave (Mar-May)
+#posterior samples
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_under = INLA::inla.posterior.sample(100, underres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_under = exp(do.call(cbind, Biobase::subListExtract(sampleList_under,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_under = matrix(rpois(length(sampleIntensity_under),
+sampleIntensity_under), nrow(sampleIntensity_under), ncol(sampleIntensity_under))
+
+
+{matplot(xForInla45$time, sampleDeaths_under, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, 0 to 44 years", c("time", "dead")], col = "red",
+cex = 0.5, ylim=c(20, 160))
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+
+#over 85
+#first wave (Mar-May)
+#posterior samples
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_over = INLA::inla.posterior.sample(100, overres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_over = exp(do.call(cbind, Biobase::subListExtract(sampleList_over,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_over = matrix(rpois(length(sampleIntensity_over),
+sampleIntensity_over), nrow(sampleIntensity_over), ncol(sampleIntensity_over))
+
+
+{matplot(xForInla85$time, sampleDeaths_over, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, 85 years and over", c("time", "dead")], col = "red",
+cex = 0.5, ylim=c(0,150))
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+```
+
+
+```{r echo=FALSE, fig.cap = "Empirical Cumulative Distribution Function of Sampled Daily Mortality Counts.", fig.subcap=c('Under 45 Years Old', 'Over 85 Years Old'), fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+ecdf_plot(sampleIntensity_under)
+ecdf_plot(sampleIntensity_over)
+```
+
+```{r echo=FALSE, fig.cap = "Plot of Excess Mortality Counts.", fig.subcap=c("Under 45 Years Old", "Over 85 Years Old"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+
+#under 45
+xPostCovid_under = xPostCovid[xPostCovid$age == "Age at time of death, 0 to 44 years",
+]
+xPostCovidForecast_under = sampleDeaths_under[match(xPostCovid_under$time,
+xForInla45$time), ]
+
+
+excessDeaths_under = xPostCovid_under$dead - xPostCovidForecast_under
+
+
+{matplot(xPostCovid_under$time, excessDeaths_under, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+
+#over 85
+xPostCovid_over = xPostCovid[xPostCovid$age == "Age at time of death, 85 years and over",]
+xPostCovidForecast_over = sampleDeaths_over[match(xPostCovid_over$time,
+xForInla85$time), ]
+
+excessDeaths_over = xPostCovid_over$dead - xPostCovidForecast_over
+
+
+{matplot(xPostCovid_over$time, excessDeaths_over, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+
+
+```
+
+
+
+```{r, echo=FALSE, fig.cap = "Histogram Of Excess Daily Mortality Counts For Under 45 Years Old", fig.subcap=c("First Wave (March to May)", "Second Wave (September to Present)"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#under 45
+excessDeathsunder_wave1 = excessDeaths_under[xPostCovid_under$time >
+as.Date("2020/03/01") & xPostCovid_under$time <
+as.Date("2020/05/01"), ]
+
+excessDeathsunder_wave2 = excessDeaths_under[xPostCovid_under$time >
+as.Date("2020/09/01") & xPostCovid_under$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathsunder_wave1, xlab="Excess Deaths", xlim=c(-50,50),main="", breaks = 10)
+hist(excessDeathsunder_wave2, xlab="Excess Deaths", xlim=c(-40,80),main="", breaks = 12)
+
+```
+
+```{r, echo=FALSE, fig.cap = "Histogram Of Excess Daily Mortality Counts For over 85 Years Old", fig.subcap=c("First Wave (March to May)", "Second Wave (September to Present)"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#over 85
+excessDeathsover_wave1 = excessDeaths_over[xPostCovid_over$time >
+as.Date("2020/03/01") & xPostCovid_over$time <
+as.Date("2020/05/01"), ]
+
+excessDeathsover_wave2 = excessDeaths_over[xPostCovid_over$time >
+as.Date("2020/09/01") & xPostCovid_over$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathsover_wave1, xlab="Excess Deaths", xlim=c(-200,500),main="", breaks = 70)
+hist(excessDeathsover_wave2, xlab="Excess Deaths", xlim=c(-150,400),main="", breaks = 55)
+
+```
+
+
+
+```{r tab1, echo=FALSE}
+qCols = c('0.5quant','0.025quant','0.975quant')
+
+#Under
+theSdunder = Pmisc::priorPost(underres)$summary[,qCols]
+
+rownames(theSdunder) = c("SD weekly", "SD yearly")
+knitr::kable(rbind(underres$summary.fixed[, qCols], theSdunder), caption = "Summary outputs and Posterior Standard Deviations for Deaths Under 45 Years Old")
+
+#Over
+theSdover = Pmisc::priorPost(overres)$summary[,qCols]
+
+rownames(theSdover) = c("SD weekly", "SD yearly")
+knitr::kable(rbind(overres$summary.fixed[, qCols], theSdover), caption = "Summary outputs and Posterior Standard Deviations for Deaths Over 85 Years Old")
+
+```
+
+
+
+```{r tab2, echo=FALSE}
+#under 45
+excessDeathsunder_wave1q = apply(excessDeathsunder_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsunder_wave1avg = apply(excessDeathsunder_wave1q, 1, mean)
+excessDeathsunder_wave2q = apply(excessDeathsunder_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsunder_wave2avg = apply(excessDeathsunder_wave2q, 1, mean)
+
+excessdeathsunder_quant = rbind(excessDeathsunder_wave1avg, excessDeathsunder_wave2avg)
+rownames(excessdeathsunder_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathsunder_quant, 0), caption="Summary of Excess Deaths for Under 45 Years Old")
+
+
+#over 85
+excessDeathsover_wave1q = apply(excessDeathsover_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsover_wave1avg = apply(excessDeathsover_wave1q, 1, mean)
+excessDeathsover_wave2q = apply(excessDeathsover_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsover_wave2avg = apply(excessDeathsover_wave2q, 1, mean)
+
+excessdeathsover_quant = rbind(excessDeathsover_wave1avg, excessDeathsover_wave2avg)
+rownames(excessdeathsover_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathsover_quant, 0), caption="Summary of Excess Deaths for Over 85 Years Old")
+
+```
+
+# Discussion
+The following additional prior specifications were explored for a prior sensitivity analysis of both deaths under 45 years old and over 85 years old :
+
+(1) $$\tau \sim \text{Exponential prior such that } Pr( \tau^2 > log(5)) = 0.5 \text{ and } \sigma \sim \text{Exponential prior such that} Pr(\sigma^2 > 10) = 0.5$$
+
+(2) $$\tau \sim \text{Exponential prior such that } Pr( \tau^2 > log(1.01)) = 0.5 \text{ and } \sigma \sim \text{Exponential prior such that} Pr(\sigma^2 > 0.1) = 0.5$$
+
+Model (1) represents the prior belief that the weekly variability should be no greater than by a factor of 4 as the prior median and the yearly change in slope should be no greater than 10 as the prior median. Model (2) represents the prior belief that the weekly variability should be no greater than 1% as the prior median and the yearly change in slope should be no greater than 0.1 as the prior median. As the posterior distributions of the fitted model closely overlaps with model (1) and model (2) for both the weekly and yearly variability of the under 45 years old and over 85 years old deaths, this suggests that the priors are not sensitive and the data is mainly informing the posteriors rather than the priors. 
+
+The posterior median for the weekly variability of deaths under 45 years old is 0.023 and yearly variability is 0.027 with relatively wide 95% credible intervals of (0.009, 0.043) and (0.014, 0.057) respectively. The posterior median for the weekly variability of deaths over 85 years old is 0.035 and yearly variability is 0.156 with relatively narrower 95% credible intervals of (0.030, 0.040) and (0.103, 0.231) respectively. There appears to be a slightly greater difference in deaths from year to year than week to week. 
+
+The yearly change in slope plot in Figure 4 indicates that the seasonal trend is quite visible for the over 85 years old age group and less strong for the under 45 years old age group. Additionally, there appears to be a steady increase in mortality counts since 2015 for ages under 45 years old and a steady increase since 2010 for ages over 85 years old.
+
+The recently observed deaths in both age groups tends to be higher than the forecasted deaths based on historical, pre-COVID era data shown in Figure 5. The excess deaths, that is, the difference in the number of deaths in the present COVID era and the forecasted deaths based on historical, pre-COVID era data is shown in Figure 7 to 9. The excess deaths for the under 45 years old age group fluctuates dramatically between about 10 fewer deaths to 40 excess deaths. In contrast, the over 85 years old age group tend to consistently have about 100 excess deaths since June with a dramatic spike to an upwards of 400 excess deaths in May. 
+
+The median number of excess deaths in the first wave (March to May) for the under 45 years old age group is 9 with a 95% CI of 10 fewer deaths to 27 excess deaths. The median number of excess deaths in the second wave (September to present) is 22 with a 95% CI of 0 fewer deaths and 42 excess deaths. The median number of excess deaths in the first wave (March to May) for the over 85 years old age group is 128 with a 95% CI of 47 to 206 excess deaths. The median number of excess deaths in the second wave (September to present) is 118 with a 95% CI of 22 to 241 excess deaths. It appears that the younger population has been more affected in the second wave than first whereas this is the converse for the elderly. Although there is greater variability in excess deaths among the elderly, it is apparent that those over the age of 85 years old are consistently at higher risk than those under the age of 45 years old. 
+
+# Conclusion
+The under 45 years old age group have been more affected in the second wave (September to present) than the first wave (March to May) of the current COVID era whereas the converse is true for the over 85 years old age group. Although there is greater variability in excess deaths for the over 85 years old age group, the elderly population are consistently at higher risk. 
+
+# References
+[1] Bayesian computing. (2015). Spatial and Spatio-temporal Bayesian Models with R-INLA, 75-126. doi:
+10.1002/9781118950203.ch4
+
+[2] Heckman, Nancy E. and James O. Ramsay (2000). “Penalized Regression with Model-Based Penalties”.
+In: The Canadian Journal of Statistics / La Revue Canadienne de Statistique 28.2, pp. 241–258. url:
+http://www.jstor.org/stable/3315976.
+
+[3] Simpson, Daniel, Haavard Rue, Andrea Riebler, Thiago G. Martins, and Sigrunn H. Sorbye (Feb. 2017).
+“Penalising Model Component Complexity: A Principled, Practical Approach to Constructing Priors”. In:
+Statistical Science 32.1, pp. 1–28. doi: 10.1214/16-STS576
+
+
+
+# Appendix
+
+```{r include=FALSE}
+#select total
+xForInlaTotal= xForInla[xForInla$age == 'Age at time of death, all ages', ]
+
+#fit INLA on total deaths
+totalres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+```
+
+```{r , echo=FALSE, fig.cap="Prior Sensitivity Analysis for Total Deaths. Prior and Posterior Distributions.", fig.subcap=c("by Weekly", "by Yearly"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+
+#prior sensitivity analysis 
+total2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+total3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_totalres= Pmisc::priorPost(totalres)
+theSd_total2= Pmisc::priorPost(total2)
+theSd_total3= Pmisc::priorPost(total3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_totalres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,270))
+lines(theSd_totalres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_total2$`sd for timeIid`$posterior, col='green')
+lines(theSd_total2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_total3$`sd for timeIid`$posterior, col='red')
+lines(theSd_total3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_totalres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,10), xlim=c(0,3))
+lines(theSd_totalres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_total2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_total2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_total3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_total3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+```
+
+```{r, echo=FALSE, fig.cap="Random Effect of Total Population. Yearly Change in Slope.", fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align="hold"}
+
+#random effect for total
+{matplot(xForInlaTotal$time, totalres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5) *
+0.4, ylab="Relative Change, Yearly", xlab="Time")
+legend("topleft", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+
+}
+
+```
+
+```{r echo=FALSE, fig.cap="Simulated Posterior Samples for Daily Mortality Counts of Total Population.", fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#first wave (Mar-May)
+#posterior samples
+#total
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_total = INLA::inla.posterior.sample(100, totalres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_total = exp(do.call(cbind, Biobase::subListExtract(sampleList_total,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_total = matrix(rpois(length(sampleIntensity_total),
+sampleIntensity_total), nrow(sampleIntensity_total), ncol(sampleIntensity_total))
+
+
+{matplot(xForInlaTotal$time, sampleDeaths_total, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, all ages", c("time", "dead")], col = "red",
+cex = 0.5)
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+```
+
+```{r echo=FALSE, fig.cap = "Empirical Cumulative Distribution Function of Sampled Daily Mortality Counts of Total Population.", fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+ecdf_plot(sampleIntensity_total)
+```
+
+```{r echo=FALSE, fig.cap = "Plot of Excess Mortality Counts for Total Population.", fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#total
+xPostCovid_total = xPostCovid[xPostCovid$age == "Age at time of death, all ages",]
+xPostCovidForecast_total = sampleDeaths_total[match(xPostCovid_total$time,
+xForInlaTotal$time), ]
+
+excessDeaths_total = xPostCovid_total$dead - xPostCovidForecast_total
+
+
+{matplot(xPostCovid_total$time, excessDeaths_total, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+```
+
+
+```{r, echo=FALSE, fig.cap = "Histogram Of Excess Daily Mortality Counts For Total", fig.subcap=c("First Wave (March to May)", "Second Wave (September to Present)"), fig.align="center" , fig.width=5, fig.asp=1,out.width=".55\\linewidth", fig.align='hold'}
+
+#total
+excessDeathstotal_wave1 = excessDeaths_total[xPostCovid_total$time >
+as.Date("2020/03/01") & xPostCovid_total$time <
+as.Date("2020/05/01"), ]
+
+excessDeathstotal_wave2 = excessDeaths_total[xPostCovid_total$time >
+as.Date("2020/09/01") & xPostCovid_total$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathstotal_wave1, xlab="Excess Deaths", xlim=c(-500,1500),main="", breaks = 90)
+hist(excessDeathstotal_wave2, xlab="Excess Deaths", xlim=c(-500,2000),main="", breaks = 70)
+
+```
+
+
+```{r echo=FALSE}
+#total
+theSdtotal = Pmisc::priorPost(totalres)$summary[,qCols]
+
+rownames(theSdtotal) = c("SD weekly", "SD yearly")
+knitr::kable(rbind(totalres$summary.fixed[, qCols], theSdtotal), caption = "Summary outputs and Posterior Standard Deviations for Total Deaths")
+
+#total
+excessDeathstotal_wave1q = apply(excessDeathstotal_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathstotal_wave1avg = apply(excessDeathstotal_wave1q, 1, mean)
+excessDeathstotal_wave2q = apply(excessDeathstotal_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathstotal_wave2avg = apply(excessDeathstotal_wave2q, 1, mean)
+
+excessdeathstotal_quant = rbind(excessDeathstotal_wave1avg, excessDeathstotal_wave2avg)
+rownames(excessdeathstotal_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathstotal_quant, 0), caption="Summary of Excess Deaths for Total Population")
+
+```
+
+```{r eval=FALSE}
+#load library
+library(cansim)
+library(dplyr)
+library(lubridate)
+library(INLA, verbose=FALSE)
+library(knitr)
+library(bookdown)
+library(kableExtra)
+library(LDATS)
+
+
+#load data
+deaths = get_cansim("13-10-0768-01")
+
+deaths <- deaths %>% 
+  filter(GEO == "Ontario, place of occurrence", Sex == "Both sexes") %>%
+  rename(age = "Age at time of death", dead = "VALUE")
+
+#create dataframe
+x = deaths[,c("REF_DATE", "age", "dead")]
+x$time = as.Date(x$REF_DATE)
+x$week = week(x$REF_DATE)
+x$year = year(x$REF_DATE)
+
+x = x[!is.na(x$dead), ]
+
+#view dataframe
+str(x)
+head(x)
+
+#plots
+#spikes correspond to flu season (winter months)
+plot(x[x$age == "Age at time of death, all ages", c("time", "dead")], type = "o",
+log = "y", ylab="Number of Deaths", xlab="Time", cex=0.5)
+
+xWide2 = reshape2::dcast(x, week + age ~ year, value.var = "dead")
+Syear = grep("[[:digit:]]", colnames(xWide2), value = TRUE)
+Scol = RColorBrewer::brewer.pal(length(Syear), "Spectral")
+
+{matplot(xWide2[xWide2$age == "Age at time of death, all ages", Syear], type = "l",
+lty = 1, col = Scol, xlab="Weeks", ylab="Number of Deaths")
+legend("topright", col = Scol, legend = Syear, bty = "n",
+lty = 1, lwd = 3)}
+
+
+#divide the data into pre and post covid, add extra dates for forecasting in INLA
+dateCutoff = as.Date("2020/3/1")
+xPreCovid = x[x$time < dateCutoff, ]
+xPostCovid = x[x$time >= dateCutoff, ]
+toForecast = expand.grid(age = unique(x$age), time = unique(xPostCovid$time),
+dead = NA)
+xForInla = rbind(xPreCovid[, colnames(toForecast)],
+toForecast)
+xForInla = xForInla[order(xForInla$time, xForInla$age),
+]
+
+#create some time variables, including sines and cosines. Time in years and centred so numerically stable in INLA
+xForInla$timeNumeric = as.numeric(xForInla$time)
+xForInla$timeForInla = (xForInla$timeNumeric - as.numeric(as.Date("2015/1/1")))/365.25
+xForInla$timeIid = xForInla$timeNumeric
+xForInla$sin12 = sin(2 * pi * xForInla$timeNumeric/365.25)
+xForInla$sin6 = sin(2 * pi * xForInla$timeNumeric *
+2/365.25)
+xForInla$cos12 = cos(2 * pi * xForInla$timeNumeric/365.25)
+xForInla$cos6 = cos(2 * pi * xForInla$timeNumeric *
+2/365.25)
+
+#select age groups of interest
+xForInla45= xForInla[xForInla$age == 'Age at time of death, 0 to 44 years', ]
+xForInla85= xForInla[xForInla$age == 'Age at time of death, 85 years and over', ]
+
+#fit INLA on <45 year old
+underres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.01, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+
+#fit INLA on >85 year old 
+overres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.01, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+
+#prior sensitivity analysis 
+under2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+under3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInla45,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_underres= Pmisc::priorPost(underres)
+theSd_under2= Pmisc::priorPost(under2)
+theSd_under3= Pmisc::priorPost(under3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_underres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,100), xlim=c(0,0.2))
+lines(theSd_underres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_under2$`sd for timeIid`$posterior, col='green')
+lines(theSd_under2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_under3$`sd for timeIid`$posterior, col='red')
+lines(theSd_under3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_underres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,50), xlim=c(0,0.4))
+lines(theSd_underres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_under2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_under2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_under3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_under3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+
+
+#prior sensitivity analysis 
+over2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+over3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInla85,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_overres= Pmisc::priorPost(overres)
+theSd_over2= Pmisc::priorPost(over2)
+theSd_over3= Pmisc::priorPost(over3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_overres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,160), xlim=c(0,0.1))
+lines(theSd_overres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_over2$`sd for timeIid`$posterior, col='green')
+lines(theSd_over2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_over3$`sd for timeIid`$posterior, col='red')
+lines(theSd_over3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_overres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,60), xlim=c(0,0.2))
+lines(theSd_overres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_over2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_over2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_over3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_over3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+
+#random effect under 45
+{matplot(xForInla45$time, underres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5) *
+0.4, ylab="Relative Change, Yearly", xlab="Time")
+legend("bottomright", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+
+}
+
+#random effect over 85
+{matplot(xForInla85$time, overres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5), ylab="Relative Change, Yearly", xlab="Time")
+legend("bottomright", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+}
+
+
+#under 45
+#first wave (Mar-May)
+#posterior samples
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_under = INLA::inla.posterior.sample(100, underres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_under = exp(do.call(cbind, Biobase::subListExtract(sampleList_under,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_under = matrix(rpois(length(sampleIntensity_under),
+sampleIntensity_under), nrow(sampleIntensity_under), ncol(sampleIntensity_under))
+
+
+{matplot(xForInla45$time, sampleDeaths_under, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, 0 to 44 years", c("time", "dead")], col = "red",
+cex = 0.5, ylim=c(20, 160))
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+
+#over 85
+#first wave (Mar-May)
+#posterior samples
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_over = INLA::inla.posterior.sample(100, overres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_over = exp(do.call(cbind, Biobase::subListExtract(sampleList_over,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_over = matrix(rpois(length(sampleIntensity_over),
+sampleIntensity_over), nrow(sampleIntensity_over), ncol(sampleIntensity_over))
+
+
+{matplot(xForInla85$time, sampleDeaths_over, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, 85 years and over", c("time", "dead")], col = "red",
+cex = 0.5, ylim=c(0,150))
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+
+#ecdf
+
+ecdf_plot(sampleIntensity_under)
+ecdf_plot(sampleIntensity_over)
+
+#under 45
+xPostCovid_under = xPostCovid[xPostCovid$age == "Age at time of death, 0 to 44 years",
+]
+xPostCovidForecast_under = sampleDeaths_under[match(xPostCovid_under$time,
+xForInla45$time), ]
+
+
+excessDeaths_under = xPostCovid_under$dead - xPostCovidForecast_under
+
+
+{matplot(xPostCovid_under$time, excessDeaths_under, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+
+#over 85
+xPostCovid_over = xPostCovid[xPostCovid$age == "Age at time of death, 85 years and over",]
+xPostCovidForecast_over = sampleDeaths_over[match(xPostCovid_over$time,
+xForInla85$time), ]
+
+excessDeaths_over = xPostCovid_over$dead - xPostCovidForecast_over
+
+
+{matplot(xPostCovid_over$time, excessDeaths_over, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+
+
+#under 45
+excessDeathsunder_wave1 = excessDeaths_under[xPostCovid_under$time >
+as.Date("2020/03/01") & xPostCovid_under$time <
+as.Date("2020/05/01"), ]
+
+excessDeathsunder_wave2 = excessDeaths_under[xPostCovid_under$time >
+as.Date("2020/09/01") & xPostCovid_under$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathsunder_wave1, xlab="Excess Deaths", xlim=c(-50,50),main="", breaks = 10)
+hist(excessDeathsunder_wave2, xlab="Excess Deaths", xlim=c(-40,80),main="", breaks = 12)
+
+
+
+#over 85
+excessDeathsover_wave1 = excessDeaths_over[xPostCovid_over$time >
+as.Date("2020/03/01") & xPostCovid_over$time <
+as.Date("2020/05/01"), ]
+
+excessDeathsover_wave2 = excessDeaths_over[xPostCovid_over$time >
+as.Date("2020/09/01") & xPostCovid_over$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathsover_wave1, xlab="Excess Deaths", xlim=c(-200,500),main="", breaks = 70)
+hist(excessDeathsover_wave2, xlab="Excess Deaths", xlim=c(-150,400),main="", breaks = 55)
+
+qCols = c('0.5quant','0.025quant','0.975quant')
+
+#Under
+theSdunder = Pmisc::priorPost(underres)$summary[,qCols]
+
+rownames(theSdunder) = c("SD weekly", "SD yearly")
+knitr::kable(round(rbind(underres$summary.fixed[, qCols], theSdunder),3), caption = "Summary outputs and Posterior Standard Deviations for Deaths Under 45 Years Old")
+
+#Over
+theSdover = Pmisc::priorPost(overres)$summary[,qCols]
+
+rownames(theSdover) = c("SD weekly", "SD yearly")
+knitr::kable(round(rbind(overres$summary.fixed[, qCols], theSdover),3), caption = "Summary outputs and Posterior Standard Deviations for Deaths Over 85 Years Old")
+
+#under 45
+excessDeathsunder_wave1q = apply(excessDeathsunder_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsunder_wave1avg = apply(excessDeathsunder_wave1q, 1, mean)
+excessDeathsunder_wave2q = apply(excessDeathsunder_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsunder_wave2avg = apply(excessDeathsunder_wave2q, 1, mean)
+
+excessdeathsunder_quant = rbind(excessDeathsunder_wave1avg, excessDeathsunder_wave2avg)
+rownames(excessdeathsunder_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathsunder_quant, 0), caption="Summary of Excess Deaths for Under 45 Years Old")
+
+
+#over 85
+excessDeathsover_wave1q = apply(excessDeathsover_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsover_wave1avg = apply(excessDeathsover_wave1q, 1, mean)
+excessDeathsover_wave2q = apply(excessDeathsover_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathsover_wave2avg = apply(excessDeathsover_wave2q, 1, mean)
+
+excessdeathsover_quant = rbind(excessDeathsover_wave1avg, excessDeathsover_wave2avg)
+rownames(excessdeathsover_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathsover_quant, 0), caption="Summary of Excess Deaths for Over 85 Years Old")
+
+#total
+
+#fit INLA on total deaths
+totalres = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.20), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+
+#prior sensitivity analysis 
+total2 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(5), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(10, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+total3 = inla(dead ~ sin12 + sin6 + cos12 + cos6 +
+f(timeIid, prior='pc.prec', param= c(log(1.01), 0.5)) +
+f(timeForInla, model = 'rw2', prior='pc.prec', param= c(0.1, 0.5)),
+data=xForInlaTotal,
+control.predictor = list(compute=TRUE, link=1),
+control.compute = list(config=TRUE),
+# control.inla = list(fast=FALSE, strategy='laplace'),
+family='poisson')
+
+#prior and posteriors of SD for each model
+theSd_totalres= Pmisc::priorPost(totalres)
+theSd_total2= Pmisc::priorPost(total2)
+theSd_total3= Pmisc::priorPost(total3)
+
+#prior and posterior distbns
+#prior density shows a flat exponential (recall set sigma to to 0.2)
+{plot(theSd_totalres$`sd for timeIid`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,270))
+lines(theSd_totalres$`sd for timeIid`$prior, col='blue', lty=2)
+
+lines(theSd_total2$`sd for timeIid`$posterior, col='green')
+lines(theSd_total2$`sd for timeIid`$prior, col='green', lty=2)
+
+lines(theSd_total3$`sd for timeIid`$posterior, col='red')
+lines(theSd_total3$`sd for timeIid`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+{plot(theSd_totalres$`sd for timeForInla`$posterior, type='l', xlab='Standard Deviation', ylab='Density', col='blue', ylim=c(0,10), xlim=c(0,3))
+lines(theSd_totalres$`sd for timeForInla`$prior, col='blue', lty=2)
+
+lines(theSd_total2$`sd for timeForInla`$posterior, col='green')
+lines(theSd_total2$`sd for timeForInla`$prior, col='green', lty=2)
+
+lines(theSd_total3$`sd for timeForInla`$posterior, col='red')
+lines(theSd_total3$`sd for timeForInla`$prior, col='red', lty=2)
+
+
+legend('topright',
+lty=1:2, lwd=1, legend = c('Posterior','Prior'),
+bty='n')
+}
+
+
+#random effect for total
+{matplot(xForInlaTotal$time, totalres$summary.random$timeForInla[,
+c("0.5quant", "0.975quant", "0.025quant")], type = "l",
+lty = c(1, 2, 2), col = c("black", 'red', 'red'), ylim = c(-0.5, 0.5) *
+0.4, ylab="Relative Change, Yearly", xlab="Time")
+legend("topleft", col=c('black','red', 'red'), legend=c("Trend", "95% Pred Int."), bty="n", lty=1, lwd=1)
+
+}
+
+
+#first wave (Mar-May)
+#posterior samples
+#total
+#100 posterior samples of (log lambda)
+set.seed(442)
+sampleList_total = INLA::inla.posterior.sample(100, totalres, selection = list(Predictor = 0))
+#exponentiate (lambda)
+sampleIntensity_total = exp(do.call(cbind, Biobase::subListExtract(sampleList_total,
+"latent")))
+#y (poisson(lambda))
+sampleDeaths_total = matrix(rpois(length(sampleIntensity_total),
+sampleIntensity_total), nrow(sampleIntensity_total), ncol(sampleIntensity_total))
+
+
+{matplot(xForInlaTotal$time, sampleDeaths_total, col = "#00000010",
+lwd = 2, lty = 1, type = "l", ylab="Sampled Deaths", xlab="Time")
+points(x[x$age == "Age at time of death, all ages", c("time", "dead")], col = "red",
+cex = 0.5)
+legend("bottomright",legend=c("posterior samples", "observed"), col=c("black","red"), lty=1:2)
+}
+
+ecdf_plot(sampleIntensity_total)
+
+
+#total
+xPostCovid_total = xPostCovid[xPostCovid$age == "Age at time of death, all ages",]
+xPostCovidForecast_total = sampleDeaths_total[match(xPostCovid_total$time,
+xForInlaTotal$time), ]
+
+excessDeaths_total = xPostCovid_total$dead - xPostCovidForecast_total
+
+
+{matplot(xPostCovid_total$time, excessDeaths_total, type = "l",
+lty = 1, col = "#00000030", xlab="Time", ylab="Excess Deaths")
+}
+
+#total
+excessDeathstotal_wave1 = excessDeaths_total[xPostCovid_total$time >
+as.Date("2020/03/01") & xPostCovid_total$time <
+as.Date("2020/05/01"), ]
+
+excessDeathstotal_wave2 = excessDeaths_total[xPostCovid_total$time >
+as.Date("2020/09/01") & xPostCovid_total$time <
+as.Date("2020/11/01"), ]
+
+hist(excessDeathstotal_wave1, xlab="Excess Deaths", xlim=c(-500,1500),main="", breaks = 90)
+hist(excessDeathstotal_wave2, xlab="Excess Deaths", xlim=c(-500,2000),main="", breaks = 70)
+
+#total
+theSdtotal = Pmisc::priorPost(totalres)$summary[,qCols]
+
+rownames(theSdtotal) = c("SD weekly", "SD yearly")
+knitr::kable(rbind(totalres$summary.fixed[, qCols], theSdtotal), caption = "Summary outputs and Posterior Standard Deviations for Total Deaths")
+
+#total
+excessDeathstotal_wave1q = apply(excessDeathstotal_wave1, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathstotal_wave1avg = apply(excessDeathstotal_wave1q, 1, mean)
+excessDeathstotal_wave2q = apply(excessDeathstotal_wave2, 1, quantile, probs = c(0.025,0.5, 0.975))
+excessDeathstotal_wave2avg = apply(excessDeathstotal_wave2q, 1, mean)
+
+excessdeathstotal_quant = rbind(excessDeathstotal_wave1avg, excessDeathstotal_wave2avg)
+rownames(excessdeathstotal_quant) = c("First Wave (March to May)", "Second Wave (September to Present)")
+
+kable(round(excessdeathstotal_quant, 0), caption="Summary of Excess Deaths for Total Population")
+```
+
